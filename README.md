@@ -121,11 +121,13 @@ base64 inflaría el archivo un 33%.
 |---|---|---|
 | `login` | cliente → servidor | `{usuario}` |
 | `mensaje` | cliente → servidor | `{texto, destino}` — `destino: "*"` = a todos |
-| `archivo` | cliente → servidor | `{nombre, destino}` + bloque binario |
+| `archivo` | cliente → servidor | `{nombre, destino}` + bloque binario (subida) |
+| `descargar` | cliente → servidor | `{id}` — pide un archivo ya subido |
 | `salir` | cliente → servidor | — |
 | `login_ok` / `error` | servidor → cliente | confirmación o motivo del rechazo |
 | `chat` | servidor → cliente | `{de, texto, privado}` |
-| `archivo_entrante` | servidor → cliente | `{de, nombre, tamanio}` + binario |
+| `archivo_disponible` | servidor → cliente | `{id, de, nombre, tamanio, privado}` — aviso sin bytes |
+| `archivo_datos` | servidor → cliente | `{id, nombre}` + binario (respuesta a `descargar`) |
 | `usuarios` | servidor → cliente | `{lista}` de conectados |
 | `sistema` | servidor → cliente | avisos de entrada/salida |
 
@@ -171,7 +173,9 @@ durante su `sendall()`.
 - Nombre repetido, nombre inválido o destinatario inexistente → mensaje de error
   al cliente, la sesión continúa.
 - Archivos: límite de 10 MB y el nombre se limpia con `basename()` para que nadie
-  pueda mandar `../../algo.exe` y escribir fuera de la carpeta de descargas.
+  pueda mandar `../../algo.exe`. El servidor guarda los archivos en memoria (máximo
+  100 MB; al pasarse descarta los más viejos) y solo deja descargar un archivo
+  privado a su remitente y su destinatario.
 - El servidor se apaga con Ctrl+C avisando a todos los conectados.
 
 ---
@@ -203,7 +207,7 @@ proyecto.
 | 1c | Difusión y destinatario correcto | `difundir()` y `enviar_a()` |
 | 2a | Conectarse y chatear en tiempo real | `cliente.py` → `conectar()`, `ciclo_receptor()` |
 | 2b | Interfaz para escribir y ver | Ventana Tkinter con área de chat y lista de conectados |
-| 2c | Transferencia de archivos | Botón "Archivo...", `enviar_archivo()` / `guardar_archivo()` |
+| 2c | Transferencia de archivos | Botón "Archivo...", `enviar_archivo()`, botón "Descargar" en el chat → `descargar()` / `guardar_descarga()` |
 | 3a | Hilos por conexión | `threading.Thread` por cliente en ambos extremos |
 | 3b | Servidor no bloqueante | `accept()` en el hilo principal, E/S en los hilos hijos |
 | 4a | Sockets | Módulo `socket` directo, sin frameworks |

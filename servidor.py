@@ -31,6 +31,7 @@ Uso:
 import socket
 import sys
 import threading
+from collections import OrderedDict
 from datetime import datetime
 
 import protocolo as p
@@ -79,6 +80,14 @@ class ServidorChat:
         self.clientes = {}                   # usuario -> Cliente
         self.lock = threading.RLock()        # protege self.clientes
         self.activo = False
+
+        # Archivos subidos que se pueden descargar: id -> dict con nombre,
+        # datos, remitente y quienes tienen permiso (None = todos).
+        # Tiene su propio lock porque lo tocan los hilos de todos los clientes.
+        self.archivos = OrderedDict()
+        self.lock_archivos = threading.Lock()
+        self.siguiente_id = 1
+        self.bytes_almacenados = 0
 
     # ---------------------------------------------------------------
     # Ciclo principal
@@ -239,19 +248,46 @@ class ServidorChat:
             destino = mensaje.get("destino", p.DIFUSION)
             if not binario:
                 return
-            # basename() evita que alguien mande "../../algo.txt" y escriba
-            # fuera de la carpeta de descargas del receptor.
+            # basename() evita que alguien mande "../../algo.txt" y que el
+            # nombre sugerido al guardar apunte fuera de la carpeta elegida.
             nombre = nombre.replace("\\", "/").split("/")[-1] or "archivo"
-            salida = {"tipo": p.ARCHIVO_ENTRANTE, "de": cliente.usuario,
-                      "nombre": nombre, "tamanio": len(binario),
-                      "privado": destino != p.DIFUSION}
-            log(f"{cliente.usuario} envia archivo '{nombre}' ({len(binario)} bytes) a {destino}")
+
+            if destino != p.DIFUSION:
+                with self.lock:
+                    existe = destino in self.clientes
+                if not existe:
+                    cliente.enviar({"tipo": p.ERROR, "texto": f"'{destino}' no esta conectado."})
+                    return
+
+            # El archivo se queda en el servidor; a los clientes solo se les
+            # avisa que existe. Cada quien lo descarga si quiere y a donde quiere.
+            permitidos = None if destino == p.DIFUSION else {cliente.usuario, destino}
+            id_archivo = self.guardar_archivo(nombre, binario, cliente.usuario, permitidos)
+            aviso = {"tipo": p.ARCHIVO_DISPONIBLE, "id": id_archivo, "de": cliente.usuario,
+                     "nombre": nombre, "tamanio": len(binario),
+                     "privado": destino != p.DIFUSION}
+            log(f"{cliente.usuario} subio '{nombre}' ({len(binario)} bytes) para {destino}")
+
             if destino == p.DIFUSION:
-                self.difundir(salida, binario, excepto=cliente.usuario)
-                cliente.enviar({"tipo": p.SISTEMA,
-                                "texto": f"Archivo '{nombre}' enviado a todos."})
+                self.difundir(aviso)                 # incluye al remitente
             else:
-                self.enviar_a(cliente, destino, salida, binario)
+                self.enviar_a(cliente, destino, aviso)
+
+        elif tipo == p.DESCARGAR:
+            id_archivo = mensaje.get("id")
+            with self.lock_archivos:
+                archivo = self.archivos.get(id_archivo)
+            if archivo is None:
+                cliente.enviar({"tipo": p.ERROR, "id": id_archivo,
+                                "texto": "Ese archivo ya no esta disponible en el servidor."})
+                return
+            if archivo["permitidos"] is not None and cliente.usuario not in archivo["permitidos"]:
+                cliente.enviar({"tipo": p.ERROR, "id": id_archivo,
+                                "texto": "No tienes permiso para descargar ese archivo."})
+                return
+            log(f"{cliente.usuario} descarga '{archivo['nombre']}'")
+            cliente.enviar({"tipo": p.ARCHIVO_DATOS, "id": id_archivo,
+                            "nombre": archivo["nombre"]}, archivo["datos"])
 
         else:
             cliente.enviar({"tipo": p.ERROR, "texto": f"Tipo de mensaje desconocido: {tipo}"})
@@ -282,10 +318,25 @@ class ServidorChat:
             eco["para"] = nombre_destino
             remitente.enviar(eco)
         else:
-            # En el caso de un archivo solo se confirma: no tiene caso
-            # devolverle los bytes al que ya los tiene.
-            remitente.enviar({"tipo": p.SISTEMA,
-                              "texto": f"Archivo '{mensaje['nombre']}' enviado a {nombre_destino}."})
+            # Aviso de archivo: el remitente tambien lo ve en su chat.
+            eco = dict(mensaje)
+            eco["para"] = nombre_destino
+            remitente.enviar(eco)
+
+    def guardar_archivo(self, nombre, datos, remitente, permitidos):
+        """Guarda un archivo subido y devuelve su id."""
+        with self.lock_archivos:
+            id_archivo = str(self.siguiente_id)
+            self.siguiente_id += 1
+            self.archivos[id_archivo] = {"nombre": nombre, "datos": datos,
+                                         "de": remitente, "permitidos": permitidos}
+            self.bytes_almacenados += len(datos)
+            # Si se pasa del limite se borran los mas viejos (el primero del
+            # OrderedDict es el que se subio antes).
+            while self.bytes_almacenados > p.MAX_ALMACEN and len(self.archivos) > 1:
+                _, viejo = self.archivos.popitem(last=False)
+                self.bytes_almacenados -= len(viejo["datos"])
+        return id_archivo
 
     def mandar_lista_usuarios(self):
         with self.lock:

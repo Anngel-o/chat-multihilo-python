@@ -37,6 +37,10 @@ HOST_POR_DEFECTO = "127.0.0.1"
 # Sirve para que un cliente no tumbe al servidor mandando un archivo enorme.
 MAX_ARCHIVO = 10 * 1024 * 1024
 
+# Cuanto espacio en memoria puede ocupar el servidor guardando archivos
+# subidos (100 MB). Al pasarse se descartan los mas viejos.
+MAX_ALMACEN = 100 * 1024 * 1024
+
 # Limite del bloque JSON (64 KB). Un mensaje de texto normal pesa bytes.
 MAX_JSON = 64 * 1024
 
@@ -53,13 +57,15 @@ ENCABEZADO = struct.Struct("!II")
 LOGIN = "login"              # {usuario}
 MENSAJE = "mensaje"          # {texto, destino}   destino "*" = difusion
 ARCHIVO = "archivo"          # {nombre, destino} + bloque binario
+DESCARGAR = "descargar"      # {id}   pide los bytes de un archivo ya subido
 SALIR = "salir"              # {}
 
 # Servidor -> Cliente
 LOGIN_OK = "login_ok"        # {usuario}
 ERROR = "error"              # {texto}
 CHAT = "chat"                # {de, texto, privado}
-ARCHIVO_ENTRANTE = "archivo_entrante"   # {de, nombre, tamanio, privado} + binario
+ARCHIVO_DISPONIBLE = "archivo_disponible"  # {id, de, nombre, tamanio, privado, para?}
+ARCHIVO_DATOS = "archivo_datos"            # {id, nombre} + binario
 SISTEMA = "sistema"          # {texto}
 USUARIOS = "usuarios"        # {lista}
 

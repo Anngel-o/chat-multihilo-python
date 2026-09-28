@@ -34,8 +34,6 @@ from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 import protocolo as p
 
-CARPETA_DESCARGAS = "descargas"
-
 
 class ClienteChat:
 
@@ -50,6 +48,7 @@ class ClienteChat:
         self.conectado = False
         self.lock_envio = threading.Lock()   # protege el socket al escribir
         self.cola = queue.Queue()            # puente hilo receptor -> GUI
+        self.descargas_pendientes = {}       # id de archivo -> (ruta, boton)
 
         self.construir_interfaz()
         self.raiz.protocol("WM_DELETE_WINDOW", self.al_cerrar)
@@ -191,6 +190,9 @@ class ClienteChat:
         except OSError:
             pass
         self.sock = None
+        for _, boton in self.descargas_pendientes.values():
+            self.restaurar_boton(boton)
+        self.descargas_pendientes.clear()
         self.habilitar_chat(False)
         self.lista_usuarios.delete(0, tk.END)
         self.destino.config(values=["Todos"])
@@ -240,8 +242,11 @@ class ClienteChat:
                 etiqueta = "yo" if de == self.usuario else None
                 self.escribir(f"{de}: {mensaje['texto']}", etiqueta)
 
-        elif tipo == p.ARCHIVO_ENTRANTE:
-            self.guardar_archivo(mensaje, binario)
+        elif tipo == p.ARCHIVO_DISPONIBLE:
+            self.mostrar_archivo(mensaje)
+
+        elif tipo == p.ARCHIVO_DATOS:
+            self.guardar_descarga(mensaje, binario)
 
         elif tipo == p.USUARIOS:
             self.actualizar_usuarios(mensaje["lista"])
@@ -254,6 +259,10 @@ class ClienteChat:
 
         elif tipo == p.ERROR:
             self.escribir(f"! {mensaje['texto']}", "error")
+            # Si el error es de una descarga, se reactiva su boton.
+            pendiente = self.descargas_pendientes.pop(mensaje.get("id"), None)
+            if pendiente:
+                self.restaurar_boton(pendiente[1])
 
         elif tipo == "__caida__":
             self.desconectar("Se perdio la conexion con el servidor.")
@@ -268,29 +277,72 @@ class ClienteChat:
         self.destino.config(values=opciones)
         self.destino.set(anterior if anterior in opciones else "Todos")
 
-    def guardar_archivo(self, mensaje, binario):
-        os.makedirs(CARPETA_DESCARGAS, exist_ok=True)
-        ruta = os.path.join(CARPETA_DESCARGAS, mensaje["nombre"])
+    def mostrar_archivo(self, mensaje):
+        """Pone en el chat una linea con el archivo y un boton para descargarlo."""
+        de = mensaje["de"]
+        if "para" in mensaje:
+            origen = f"privado para {mensaje['para']}"
+        elif mensaje.get("privado"):
+            origen = f"privado de {de}"
+        else:
+            origen = "tuyo" if de == self.usuario else f"de {de}"
 
-        # Si ya existe un archivo con ese nombre se le agrega un numero
-        # en vez de sobrescribirlo.
-        base, extension = os.path.splitext(ruta)
-        contador = 1
-        while os.path.exists(ruta):
-            ruta = f"{base}({contador}){extension}"
-            contador += 1
+        boton = ttk.Button(self.chat, text="Descargar", cursor="hand2")
+        boton.config(command=lambda: self.descargar(mensaje["id"], mensaje["nombre"], boton))
 
+        self.chat.config(state=tk.NORMAL)
+        self.chat.insert(tk.END, f"[{datetime.now():%H:%M}] [archivo {origen}] "
+                                 f"{mensaje['nombre']} ({mensaje['tamanio']/1024:.1f} KB)  ",
+                         "archivo")
+        # window_create incrusta un widget real dentro del texto del chat.
+        self.chat.window_create(tk.END, window=boton)
+        self.chat.insert(tk.END, "\n")
+        self.chat.see(tk.END)
+        self.chat.config(state=tk.DISABLED)
+
+    def descargar(self, id_archivo, nombre, boton):
+        if not self.conectado:
+            messagebox.showwarning("Sin conexion", "Conectate al servidor para descargar.")
+            return
+        _, extension = os.path.splitext(nombre)
+        ruta = filedialog.asksaveasfilename(
+            title="Guardar archivo como",
+            initialfile=nombre,
+            initialdir=os.path.join(os.path.expanduser("~"), "Downloads"),
+            defaultextension=extension,
+            filetypes=[("Todos los archivos", "*.*")])
+        if not ruta:
+            return
+
+        # Se recuerda a donde va cada descarga: la respuesta del servidor
+        # llega despues, por el hilo receptor.
+        self.descargas_pendientes[id_archivo] = (ruta, boton)
+        boton.config(text="Descargando...", state=tk.DISABLED)
+        try:
+            p.enviar(self.sock, {"tipo": p.DESCARGAR, "id": id_archivo}, lock=self.lock_envio)
+        except OSError as e:
+            self.desconectar(f"Error al pedir el archivo: {e}")
+
+    def guardar_descarga(self, mensaje, binario):
+        pendiente = self.descargas_pendientes.pop(mensaje["id"], None)
+        if pendiente is None:
+            return
+        ruta, boton = pendiente
         try:
             with open(ruta, "wb") as archivo:
                 archivo.write(binario)
         except OSError as e:
-            self.escribir(f"! No se pudo guardar el archivo: {e}", "error")
+            self.escribir(f"! No se pudo guardar '{ruta}': {e}", "error")
+            self.restaurar_boton(boton)
             return
+        self.escribir(f"Archivo guardado en {ruta}", "archivo")
+        boton.config(text="Descargar otra vez", state=tk.NORMAL)
 
-        kb = len(binario) / 1024
-        marca = "privado " if mensaje.get("privado") else ""
-        self.escribir(f"[archivo {marca}de {mensaje['de']}] {os.path.basename(ruta)} "
-                      f"({kb:.1f} KB) guardado en '{ruta}'", "archivo")
+    def restaurar_boton(self, boton):
+        try:
+            boton.config(text="Descargar", state=tk.NORMAL)
+        except tk.TclError:
+            pass  # el widget ya no existe
 
     # ---------------------------------------------------------------
     # Envio
